@@ -18,12 +18,12 @@ var fcmClient *messaging.Client
 func main() {
 	app := pocketbase.New()
 
-	// ---------------------------------------------------------
-	// Firebase initialization
-	// ---------------------------------------------------------
+	// ----------------------------------------
+	// 1. Firebase initialization
+	// ----------------------------------------
 	jsonConfig := os.Getenv("FCM_SERVICE_ACCOUNT_JSON")
 	if jsonConfig == "" {
-		log.Println("WARNING: FCM_SERVICE_ACCOUNT_JSON not set.")
+		log.Println("WARNING: FCM_SERVICE_ACCOUNT_JSON not set — FCM disabled.")
 	} else {
 		opt := option.WithCredentialsJSON([]byte(jsonConfig))
 		fcmApp, err := firebase.NewApp(context.Background(), nil, opt)
@@ -39,20 +39,21 @@ func main() {
 		}
 	}
 
-	// ---------------------------------------------------------
-	// Order status change hook (v0.34.2 compatible)
-	// ---------------------------------------------------------
-	app.OnRecordAfterUpdate("orders").Add(func(e *core.RecordUpdateEvent) error {
-
+	// ----------------------------------------
+	// 2. Hook: Order status change
+	// ----------------------------------------
+	app.OnRecordUpdateRequest("orders").BindFunc(func(e *core.RecordRequestEvent) error {
+		// 1) Old vs new status
 		oldStatus := e.Record.Original().GetString("status")
 		newStatus := e.Record.GetString("status")
 
 		if oldStatus == newStatus {
-			return nil
+			// no change → just continue
+			return e.Next()
 		}
 
+		// 2) Notification message
 		var title, body string
-
 		switch newStatus {
 		case "cooking":
 			title = "Order Update"
@@ -67,49 +68,54 @@ func main() {
 			title = "Order Cancelled"
 			body = "We are sorry, your order was cancelled."
 		default:
-			return nil
+			return e.Next()
 		}
 
+		// 3) Get customer ID from order
 		customerID := e.Record.GetString("customer")
 		if customerID == "" {
-			return nil
+			return e.Next()
 		}
 
+		// 4) Find FCM token for this customer
 		tokenRecord, err := e.App.FindFirstRecordByData(
 			"fcm_tokens",
 			"user",
 			customerID,
 		)
 		if err != nil {
-			e.App.Logger().Warn("No FCM token", "user", customerID)
-			return nil
+			log.Printf("No FCM token found for customer %s", customerID)
+			return e.Next()
 		}
 
 		token := tokenRecord.GetString("token")
-		if token == "" || fcmClient == nil {
-			return nil
+		if token == "" {
+			return e.Next()
 		}
 
-		msg := &messaging.Message{
-			Token: token,
-			Notification: &messaging.Notification{
-				Title: title,
-				Body:  body,
-			},
+		// 5) Send FCM notification
+		if fcmClient != nil {
+			msg := &messaging.Message{
+				Token: token,
+				Notification: &messaging.Notification{
+					Title: title,
+					Body:  body,
+				},
+			}
+			_, err := fcmClient.Send(context.Background(), msg)
+			if err != nil {
+				log.Printf("FCM send failed: %v", err)
+			} else {
+				log.Printf("Notification sent for status %s", newStatus)
+			}
 		}
 
-		if _, err := fcmClient.Send(context.Background(), msg); err != nil {
-			e.App.Logger().Error("FCM send failed", "error", err)
-		} else {
-			e.App.Logger().Info("Notification sent", "status", newStatus)
-		}
-
-		return nil
+		return e.Next()
 	})
 
-	// ---------------------------------------------------------
-	// Start PocketBase
-	// ---------------------------------------------------------
+	// ----------------------------------------
+	// Start PocketBase server
+	// ----------------------------------------
 	if err := app.Start(); err != nil {
 		log.Fatal(err)
 	}
