@@ -1,25 +1,24 @@
-package main
+app.OnRecordAfterUpdate("orders").BindFunc(func(e *core.RecordUpdateEvent) error {
 
-import (
-	"fmt"
-	"log"
+	// DEBUG LOG 1: Confirms the hook is firing for an order update
+	e.App.Logger().Info("--- HOOK FIRED: Order Record Updated ---", "recordId", e.Record.Id, "collection", e.Record.Collection().Name)
 
-	"github.com/pocketbase/pocketbase"
-	"github.com/pocketbase/pocketbase/core"
-)
+	oldStatus := e.Record.Original().GetString("status")
+	newStatus := e.Record.GetString("status")
 
-func main() {
-	app := pocketbase.New()
-
-	// Hook: after a record in "orders" collection is updated
-	app.OnRecordAfterUpdate("orders", func(e *core.RecordEvent) error {
-		newStatus := e.Record.Get("status")
-		fmt.Printf("[LOG] Order updated: ID=%s, New status=%v\n", e.Record.Id, newStatus)
-		return nil
-	})
-
-	// Start PocketBase
-	if err := app.Start(); err != nil {
-		log.Fatal(err)
+	// If status hasn't changed, do nothing
+	if oldStatus == newStatus {
+		e.App.Logger().Info("Hook Exited: Status field did not change.", "old", oldStatus, "new", newStatus)
+		return nil // Exits silently if only other fields (like total) changed
 	}
-}
+
+	// DEBUG LOG 2: Confirms a status change was detected
+	e.App.Logger().Info("Status Change Detected! Sending Notification...", "old", oldStatus, "new", newStatus)
+
+	// ... (rest of your notification logic) ...
+	// The rest of your code is here, which handles status specific logic and token lookup
+
+	// ... (Your notification sending logic) ...
+
+	return nil
+})
