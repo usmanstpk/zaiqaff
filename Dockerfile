@@ -1,45 +1,38 @@
 # --------------------------------------------------------------------------
 # STAGE 1: BUILDER
-# This stage uses a full Go environment to compile the application.
-# We use a recent Go image based on Alpine Linux for a smaller initial size.
 # --------------------------------------------------------------------------
 FROM golang:1.22-alpine AS builder
 
-# Set the CGO_ENABLED flag to 0 for a static build, which works better with scratch.
 ENV CGO_ENABLED=0
-
-# Set the working directory for all subsequent commands
 WORKDIR /app
 
-# Copy the dependency files first (for better caching)
-# If go.mod/go.sum don't change, Docker skips the time-consuming 'go mod download'.
+RUN apk add --no-cache git
+
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy the rest of the source code (including your main.go)
 COPY . .
-
-# Build the custom PocketBase executable
-# -o pocketbase specifies the output file name.
 RUN go build -ldflags "-s -w" -o pocketbase ./main.go
 
 
 # --------------------------------------------------------------------------
-# STAGE 2: FINAL
-# This stage uses the 'scratch' image, which is the smallest possible base image
-# (it's completely empty). It only contains the compiled binary for maximum security and minimal size.
+# STAGE 2: RUNTIME
 # --------------------------------------------------------------------------
-FROM scratch
+FROM alpine:latest
 
-# Set the working directory for the final container
-WORKDIR /app
+# Install CA certificates for HTTPS (Firebase REQUIRED)
+RUN apk add --no-cache ca-certificates tzdata
 
-# Copy only the compiled binary from the 'builder' stage
-COPY --from=builder /app/pocketbase /app/pocketbase
+WORKDIR /pb
 
-# IMPORTANT: Coolify expects the application to run the main binary
-# This sets the command that executes when the container starts.
-ENTRYPOINT ["/app/pocketbase"]
+# Copy PocketBase binary
+COPY --from=builder /app/pocketbase /pb/pocketbase
 
-# Expose the standard PocketBase port for documentation (optional, but good practice)
+# Create PocketBase data directory
+RUN mkdir -p /pb/pb_data
+
+# Expose PocketBase port
 EXPOSE 8080
+
+# Start PocketBase correctly
+CMD ["/pb/pocketbase", "serve", "--http=0.0.0.0:8080"]
