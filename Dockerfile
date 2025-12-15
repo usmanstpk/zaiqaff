@@ -1,52 +1,48 @@
-# --------------------------------------------------------------------------
-# STAGE 1: BUILDER
-# Purpose: Compile the Go application into a static binary
-# --------------------------------------------------------------------------
-FROM golang:1.25-alpine AS builder
+# BUILD STAGE
+# Use a full Go environment to compile the application
+FROM golang:1.22-alpine AS builder
 
-# Set CGO_ENABLED=0 for a fully static build, essential for running on a minimal image
-ENV CGO_ENABLED=0
+# Set working directory for the build stage
 WORKDIR /app
 
-# Install git (often needed for go mod to fetch dependencies)
-RUN apk add --no-cache git
-
 # Copy go module files and download dependencies
+# This speeds up subsequent builds if dependencies haven't changed
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy the rest of the source code
+# Copy all source code
 COPY . .
 
-# Build the Go application
-RUN go build -ldflags "-s -w" -o pocketbase ./main.go
+# Build the Go binary
+# -a: force rebuild packages that are already up-to-date
+# -tags: include the "sqlite_omit_footer" build tag for static compilation (optional, but good practice)
+# -o: output file name
+RUN go build -o /pb -ldflags "-s -w"
 
+# RUNTIME STAGE
+# Use a minimal Alpine Linux image for the final container
+FROM alpine:3.18
 
-# --------------------------------------------------------------------------
-# STAGE 2: RUNTIME
-# Purpose: Create a small, secure, production-ready image
-# --------------------------------------------------------------------------
-FROM alpine:latest
+# Install necessary packages for PocketBase
+# For a full install, we need ca-certificates and sqlite3
+RUN apk add --no-cache ca-certificates sqlite-libs
 
-# Install CA certificates for HTTPS and timezone data
-RUN apk add --no-cache ca-certificates tzdata
-
-# Set the working directory for PocketBase
+# Set working directory for the application
 WORKDIR /pb
 
-# Copy the statically built PocketBase binary from the builder stage
-COPY --from=builder /app/pocketbase /pb/pocketbase
+# Copy the built PocketBase binary from the builder stage
+COPY --from=builder /pb /pb
 
-# --- REMOVED PROBLEMATIC COPY LINES ---
-# If you later create 'pb_public', 'migrations', or 'hooks' folders,
-# you must uncomment the corresponding COPY lines in your Dockerfile.
-# --------------------------------------
+# Copy the default PocketBase UI and any other files your extension needs
+# Create required directories
+RUN mkdir -p pb_data pb_public migrations
 
-# Create the PocketBase data directory (will contain your SQLite database)
-RUN mkdir -p /pb/pb_data
+# Make sure the binary is executable
+RUN chmod +x /pb
 
-# Expose the application port
+# Expose the default port PocketBase runs on
 EXPOSE 8080
 
-# Start PocketBase correctly, listening on all interfaces
-CMD ["/pb/pocketbase", "serve", "--http=0.0.0.0:8080"]
+# Run the PocketBase application
+# The binary is executed directly to run the extension
+ENTRYPOINT ["/pb", "serve", "--http", "0.0.0.0:8080", "--dir", "pb_data"]
