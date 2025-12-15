@@ -8,54 +8,49 @@ import (
 	"github.com/pocketbase/pocketbase"
 	"github.com/pocketbase/pocketbase/core"
 
-	// Official Firebase Admin SDK imports
 	firebase "firebase.google.com/go"
 	"firebase.google.com/go/messaging"
 	"google.golang.org/api/option"
 )
 
-var fcmClient *messaging.Client // Global client
+var fcmClient *messaging.Client
 
 func main() {
 	app := pocketbase.New()
 
-	// -----------------------------------------------------------------
-	// 1. Initialize Firebase Admin SDK
-	// -----------------------------------------------------------------
+	// ---------------------------------------------------------
+	// 1. Firebase Admin SDK Initialization
+	// ---------------------------------------------------------
 	jsonConfig := os.Getenv("FCM_SERVICE_ACCOUNT_JSON")
 	if jsonConfig == "" {
-		// Log warning but don't crash, so the app can still run without notifications if needed
-		log.Println("WARNING: FCM_SERVICE_ACCOUNT_JSON is not set. Notifications will not work.")
+		log.Println("WARNING: FCM_SERVICE_ACCOUNT_JSON not set. Notifications disabled.")
 	} else {
 		opt := option.WithCredentialsJSON([]byte(jsonConfig))
 		fcmApp, err := firebase.NewApp(context.Background(), nil, opt)
 		if err != nil {
-			log.Printf("ERROR: Failed to init Firebase App: %v", err)
+			log.Printf("ERROR: Firebase init failed: %v", err)
 		} else {
-			// Get the Messaging Client
 			fcmClient, err = fcmApp.Messaging(context.Background())
 			if err != nil {
-				log.Printf("ERROR: Failed to get FCM client: %v", err)
+				log.Printf("ERROR: FCM client init failed: %v", err)
 			} else {
-				log.Println("SUCCESS: FCM client initialized and ready.")
+				log.Println("SUCCESS: FCM client initialized.")
 			}
 		}
 	}
 
-	// -----------------------------------------------------------------
-	// 2. HOOK: Send Notification when Order Status Changes
-	// -----------------------------------------------------------------
-	app.OnRecordAfterUpdateRequest("orders").BindFunc(func(e *core.RecordEvent) error {
-		// A. Get the old and new status
+	// ---------------------------------------------------------
+	// 2. Order Status Change Notification Hook (UPDATED)
+	// ---------------------------------------------------------
+	app.OnRecordAfterUpdate("orders").Add(func(e *core.RecordUpdateEvent) error {
+
 		oldStatus := e.Record.Original().GetString("status")
 		newStatus := e.Record.GetString("status")
 
-		// If status hasn't changed, do nothing
 		if oldStatus == newStatus {
 			return nil
 		}
 
-		// B. Determine the message based on the new status
 		var title, body string
 
 		switch newStatus {
@@ -72,21 +67,24 @@ func main() {
 			title = "Order Cancelled"
 			body = "We are sorry, your order was cancelled."
 		default:
-			return nil // Unknown status, skip
+			return nil
 		}
 
-		// C. Get the Customer ID from the order
 		customerID := e.Record.GetString("customer")
 		if customerID == "" {
 			return nil
 		}
 
-		// D. Find the FCM Token for this customer
-		// Note: We use "fcm_tokens" (from your schema), not "push_tokens"
-		tokenRecord, err := app.Dao().FindFirstRecordByData("fcm_tokens", "user", customerID)
+		// -----------------------------------------------------
+		// Find FCM token (NEW DB ACCESS METHOD)
+		// -----------------------------------------------------
+		tokenRecord, err := e.App.FindFirstRecordByData(
+			"fcm_tokens",
+			"user",
+			customerID,
+		)
 		if err != nil {
-			// No token found for this user
-			log.Printf("No FCM token found for user %s", customerID)
+			e.App.Logger().Warn("No FCM token found", "user", customerID)
 			return nil
 		}
 
@@ -95,29 +93,35 @@ func main() {
 			return nil
 		}
 
-		// E. Send the Notification (Real Firebase Send)
-		if fcmClient != nil {
-			message := &messaging.Message{
-				Notification: &messaging.Notification{
-					Title: title,
-					Body:  body,
-				},
-				Token: token,
-			}
-
-			response, err := fcmClient.Send(context.Background(), message)
-			if err != nil {
-				e.App.Logger().Error("Failed to send FCM message", "error", err, "token", token)
-			} else {
-				e.App.Logger().Info("🚀 Notification Sent!", "response", response, "status", newStatus)
-			}
-		} else {
-			log.Println("Skipping notification: FCM client not initialized.")
+		// -----------------------------------------------------
+		// Send Firebase Notification
+		// -----------------------------------------------------
+		if fcmClient == nil {
+			e.App.Logger().Warn("FCM client not initialized")
+			return nil
 		}
 
-		return e.Next()
+		msg := &messaging.Message{
+			Token: token,
+			Notification: &messaging.Notification{
+				Title: title,
+				Body:  body,
+			},
+		}
+
+		resp, err := fcmClient.Send(context.Background(), msg)
+		if err != nil {
+			e.App.Logger().Error("FCM send failed", "error", err)
+		} else {
+			e.App.Logger().Info("Notification sent", "response", resp)
+		}
+
+		return nil
 	})
 
+	// ---------------------------------------------------------
+	// Start PocketBase
+	// ---------------------------------------------------------
 	if err := app.Start(); err != nil {
 		log.Fatal(err)
 	}
