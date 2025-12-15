@@ -4,82 +4,120 @@ import (
 	"context"
 	"log"
 	"os"
-	
+
 	"github.com/pocketbase/pocketbase"
-	"github.com/pocketbase/pocketbase/core" 
-	
+	"github.com/pocketbase/pocketbase/core"
+
 	// Official Firebase Admin SDK imports
 	firebase "firebase.google.com/go"
 	"firebase.google.com/go/messaging"
 	"google.golang.org/api/option"
 )
 
-var fcmClient *messaging.Client // Global client for reusability
+var fcmClient *messaging.Client // Global client
 
 func main() {
 	app := pocketbase.New()
 
-	// 1. Initialize Firebase Admin SDK (FCM v1)
+	// -----------------------------------------------------------------
+	// 1. Initialize Firebase Admin SDK
+	// -----------------------------------------------------------------
 	jsonConfig := os.Getenv("FCM_SERVICE_ACCOUNT_JSON")
 	if jsonConfig == "" {
-		log.Fatal("FATAL: FCM_SERVICE_ACCOUNT_JSON environment variable is not set. Cannot initialize FCM service.")
+		// Log warning but don't crash, so the app can still run without notifications if needed
+		log.Println("WARNING: FCM_SERVICE_ACCOUNT_JSON is not set. Notifications will not work.")
+	} else {
+		opt := option.WithCredentialsJSON([]byte(jsonConfig))
+		fcmApp, err := firebase.NewApp(context.Background(), nil, opt)
+		if err != nil {
+			log.Printf("ERROR: Failed to init Firebase App: %v", err)
+		} else {
+			// Get the Messaging Client
+			fcmClient, err = fcmApp.Messaging(context.Background())
+			if err != nil {
+				log.Printf("ERROR: Failed to get FCM client: %v", err)
+			} else {
+				log.Println("SUCCESS: FCM client initialized and ready.")
+			}
+		}
 	}
 
-	// Use the JSON content for authentication
-	opt := option.WithCredentialsJSON([]byte(jsonConfig))
-	
-	// A simple nil configuration works if the JSON is complete.
-	fcmApp, err := firebase.NewApp(context.Background(), nil, opt)
-	if err != nil {
-		log.Fatalf("FATAL: Error initializing Firebase Admin SDK: %v", err)
-	}
-	
-	// Get the Messaging Client
-	fcmClient, err = fcmApp.Messaging(context.Background())
-	if err != nil {
-		log.Fatalf("FATAL: Error getting FCM client: %v", err)
-	}
-	log.Println("SUCCESS: FCM v1 client initialized and ready.")
+	// -----------------------------------------------------------------
+	// 2. HOOK: Send Notification when Order Status Changes
+	// -----------------------------------------------------------------
+	app.OnRecordAfterUpdateRequest("orders").BindFunc(func(e *core.RecordEvent) error {
+		// A. Get the old and new status
+		oldStatus := e.Record.Original().GetString("status")
+		newStatus := e.Record.GetString("status")
 
-
-	// 2. PocketBase Hook Logic to send a notification
-	// **THIS IS THE FINAL CORRECTION: Using .BindFunc(func) as per documentation.**
-	app.OnRecordAfterCreateSuccess("push_tokens").BindFunc(func(e *core.RecordEvent) error { 
-		// Get the device token from the newly created record
-		token := e.Record.GetString("token") 
-		
-		if token == "" {
-			e.App.Logger().Warn("push_tokens record created without a device token. Skipping notification.", "recordId", e.Record.Id)
+		// If status hasn't changed, do nothing
+		if oldStatus == newStatus {
 			return nil
 		}
 
-		// Define the FCM v1 message payload
-		message := &messaging.Message{
-			Notification: &messaging.Notification{
-				Title: "Welcome!",
-				Body:  "Your device is successfully registered for notifications.",
-			},
-			Token: token, // The target device token
-			// Data: map[string]string{ "notification_type": "welcome", "user_id": e.Record.GetString("user") }, 
+		// B. Determine the message based on the new status
+		var title, body string
+
+		switch newStatus {
+		case "cooking":
+			title = "Order Update"
+			body = "Your food is being prepared! 🍳"
+		case "out_for_delivery":
+			title = "Order Update"
+			body = "Your rider is on the way! 🛵"
+		case "completed":
+			title = "Delivered"
+			body = "Enjoy your meal! 😋"
+		case "cancelled":
+			title = "Order Cancelled"
+			body = "We are sorry, your order was cancelled."
+		default:
+			return nil // Unknown status, skip
 		}
 
-		// Send the message using the global client
-		response, err := fcmClient.Send(context.Background(), message)
+		// C. Get the Customer ID from the order
+		customerID := e.Record.GetString("customer")
+		if customerID == "" {
+			return nil
+		}
+
+		// D. Find the FCM Token for this customer
+		// Note: We use "fcm_tokens" (from your schema), not "push_tokens"
+		tokenRecord, err := app.Dao().FindFirstRecordByData("fcm_tokens", "user", customerID)
 		if err != nil {
-			// Log the error but return nil so the DB transaction remains successful
-			e.App.Logger().Error("Failed to send FCM v1 message", "error", err.Error(), "token", token)
-			return nil 
+			// No token found for this user
+			log.Printf("No FCM token found for user %s", customerID)
+			return nil
 		}
 
-		e.App.Logger().Info("Successfully sent FCM v1 message", "token", token, "response", response)
-		
-		// The documentation mentions calling e.Next() if we want to proceed with the execution chain.
-		// Since we only want to send a notification and don't need to block or modify the chain, 
-		// returning nil (success) is usually sufficient for simple handlers like this one.
-		return nil
-	}) 
+		token := tokenRecord.GetString("token")
+		if token == "" {
+			return nil
+		}
 
-	// Start the PocketBase application
+		// E. Send the Notification (Real Firebase Send)
+		if fcmClient != nil {
+			message := &messaging.Message{
+				Notification: &messaging.Notification{
+					Title: title,
+					Body:  body,
+				},
+				Token: token,
+			}
+
+			response, err := fcmClient.Send(context.Background(), message)
+			if err != nil {
+				e.App.Logger().Error("Failed to send FCM message", "error", err, "token", token)
+			} else {
+				e.App.Logger().Info("🚀 Notification Sent!", "response", response, "status", newStatus)
+			}
+		} else {
+			log.Println("Skipping notification: FCM client not initialized.")
+		}
+
+		return e.Next()
+	})
+
 	if err := app.Start(); err != nil {
 		log.Fatal(err)
 	}
