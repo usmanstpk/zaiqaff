@@ -1,6 +1,6 @@
 module zaiqa-pocketbase-ext
 
-go 1.25.5
+go 1.24.0
 
 require (
 	firebase.google.com/go v3.13.0+incompatible
