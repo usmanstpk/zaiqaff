@@ -19,20 +19,20 @@ func main() {
 	app := pocketbase.New()
 
 	// ---------------------------------------------------------
-	// 1. Firebase Admin SDK Initialization
+	// Firebase initialization
 	// ---------------------------------------------------------
 	jsonConfig := os.Getenv("FCM_SERVICE_ACCOUNT_JSON")
 	if jsonConfig == "" {
-		log.Println("WARNING: FCM_SERVICE_ACCOUNT_JSON not set. Notifications disabled.")
+		log.Println("WARNING: FCM_SERVICE_ACCOUNT_JSON not set.")
 	} else {
 		opt := option.WithCredentialsJSON([]byte(jsonConfig))
 		fcmApp, err := firebase.NewApp(context.Background(), nil, opt)
 		if err != nil {
-			log.Printf("ERROR: Firebase init failed: %v", err)
+			log.Printf("Firebase init error: %v", err)
 		} else {
 			fcmClient, err = fcmApp.Messaging(context.Background())
 			if err != nil {
-				log.Printf("ERROR: FCM client init failed: %v", err)
+				log.Printf("FCM client error: %v", err)
 			} else {
 				log.Println("SUCCESS: FCM client initialized.")
 			}
@@ -40,7 +40,7 @@ func main() {
 	}
 
 	// ---------------------------------------------------------
-	// 2. Order Status Change Notification Hook (UPDATED)
+	// Order status change hook (v0.34.2 compatible)
 	// ---------------------------------------------------------
 	app.OnRecordAfterUpdate("orders").Add(func(e *core.RecordUpdateEvent) error {
 
@@ -75,29 +75,18 @@ func main() {
 			return nil
 		}
 
-		// -----------------------------------------------------
-		// Find FCM token (NEW DB ACCESS METHOD)
-		// -----------------------------------------------------
 		tokenRecord, err := e.App.FindFirstRecordByData(
 			"fcm_tokens",
 			"user",
 			customerID,
 		)
 		if err != nil {
-			e.App.Logger().Warn("No FCM token found", "user", customerID)
+			e.App.Logger().Warn("No FCM token", "user", customerID)
 			return nil
 		}
 
 		token := tokenRecord.GetString("token")
-		if token == "" {
-			return nil
-		}
-
-		// -----------------------------------------------------
-		// Send Firebase Notification
-		// -----------------------------------------------------
-		if fcmClient == nil {
-			e.App.Logger().Warn("FCM client not initialized")
+		if token == "" || fcmClient == nil {
 			return nil
 		}
 
@@ -109,11 +98,10 @@ func main() {
 			},
 		}
 
-		resp, err := fcmClient.Send(context.Background(), msg)
-		if err != nil {
+		if _, err := fcmClient.Send(context.Background(), msg); err != nil {
 			e.App.Logger().Error("FCM send failed", "error", err)
 		} else {
-			e.App.Logger().Info("Notification sent", "response", resp)
+			e.App.Logger().Info("Notification sent", "status", newStatus)
 		}
 
 		return nil
