@@ -1,6 +1,6 @@
 # BUILD STAGE
 # Use a full Go environment to compile the application
-FROM golang:1.22-alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 # Set working directory for the build stage
 WORKDIR /app
